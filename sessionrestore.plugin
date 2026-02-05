@@ -1,0 +1,11 @@
+[Plugin]
+Loader=python3
+Module=sessionrestore
+IAge=3
+Name=Session Restore
+Name[ko]=세션 복원
+Description=Save and restore all open tabs (including unsaved text) across gedit sessions.
+Description[ko]=gedit 세션 간 열려 있는 모든 탭(미저장 텍스트 포함)을 저장하고 복원합니다.
+Authors=onion
+Copyright=Copyright © 2026 onion
+Website=https://github.com/onion/gedit-session-restore

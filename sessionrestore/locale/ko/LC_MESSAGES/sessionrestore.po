@@ -1,0 +1,28 @@
+# Korean translations for Session Restore gedit plugin.
+# Copyright (C) 2025
+# This file is distributed under the same license as the sessionrestore package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: sessionrestore 1.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-01-01 00:00+0900\n"
+"PO-Revision-Date: 2025-01-01 00:00+0900\n"
+"Last-Translator: \n"
+"Language-Team: Korean\n"
+"Language: ko\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Also preserve unsaved modifications of saved files"
+msgstr "이미 저장된 파일의 미저장 수정 내용도 보존"
+
+msgid "Enable per-tab auto snapshot (crash recovery)"
+msgstr "탭별 자동 스냅샷 활성화 (비정상 종료 대비)"
+
+msgid "Idle time before saving:"
+msgstr "저장을 위한 입력없음 대기시간:"
+
+msgid "sec"
+msgstr "초"
