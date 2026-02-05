@@ -27,7 +27,7 @@ Save and restore all open tabs (including unsaved text) across gedit sessions.
 
 ```bash
 # Clone the repository
-git clone https://github.com/onion/gedit-session-restore.git
+git clone https://github.com/onionmixer/gedit-session-restore.git
 
 # Create symlinks to the gedit plugin directory
 ln -s "$(pwd)/gedit-session-restore/sessionrestore.plugin" \
