@@ -30,12 +30,17 @@ class SessionRestoreWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._debounce_id = None
         self._doc_handlers = {}  # doc → handler_id
         self._restoring = False  # 복원 중 저장 방지 플래그
+        self._closing = False  # 윈도우 종료 중 플래그 (Phase 9-2)
+        self._restore_attempted = False  # 복원 시도 여부 (Phase 9-3)
         self._restore_settle_id = None  # 복원 후 안정화 타이머
+        self._restore_fallback_id = None  # show 미수신 fallback 타이머 (Phase 9-1)
         self._pending_modifications = {}  # tab → (handler_id, content, line, col)
         self._tab_idle_timers = {}  # doc → GLib source id (per-tab idle snapshot)
 
     def do_activate(self):
-        print("[SessionRestore] do_activate")
+        print("[SessionRestore] do_activate (window visible: %s, restored: %s)"
+              % (self.window.get_visible(),
+                 SessionRestoreAppActivatable.is_restored()))
         self._session.ensure_dirs()
 
         # 아직 세션이 복원되지 않은 경우, 복원 전까지 저장을 차단한다.
@@ -54,12 +59,20 @@ class SessionRestoreWindowActivatable(GObject.Object, Gedit.WindowActivatable):
 
         self._show_handler = self.window.connect("show", self._on_window_show)
 
+        # Phase 9-1: show 시그널 미수신 fallback
+        # do_activate() 시점에 윈도우가 이미 표시된 상태이면
+        # show 시그널이 다시 발생하지 않으므로 idle 콜백으로 복원을 트리거한다.
+        if not SessionRestoreAppActivatable.is_restored():
+            self._restore_fallback_id = GLib.idle_add(
+                self._check_restore_needed)
+
         # 이미 열려있는 탭의 document changed 시그널 연결
         for doc in self.window.get_documents():
             self._connect_doc(doc)
 
     def do_deactivate(self):
         print("[SessionRestore] do_deactivate")
+        self._cancel_restore_fallback()
         self._cancel_restore_settle()
         self._cancel_debounce()
         self._cancel_all_tab_idle_timers()
@@ -119,6 +132,11 @@ class SessionRestoreWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         if self._restore_settle_id is not None:
             GLib.source_remove(self._restore_settle_id)
             self._restore_settle_id = None
+
+    def _cancel_restore_fallback(self):
+        if self._restore_fallback_id is not None:
+            GLib.source_remove(self._restore_fallback_id)
+            self._restore_fallback_id = None
 
     def _schedule_save(self):
         """디바운스: 연속 이벤트를 병합하여 _DEBOUNCE_MS 후 저장."""
@@ -237,7 +255,10 @@ class SessionRestoreWindowActivatable(GObject.Object, Gedit.WindowActivatable):
                         "language_id": language_id,
                     })
             else:
+                # Phase 9-4: 빈 unsaved 탭은 세션에 포함하지 않음
                 text = self._extract_text(doc)
+                if not text:
+                    continue
                 text_bytes = len(text.encode("utf-8", errors="replace"))
                 if text_bytes > _MAX_UNSAVED_BYTES:
                     print("[SessionRestore] unsaved tab too large (%d bytes), skipping: %s"
@@ -269,6 +290,8 @@ class SessionRestoreWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         """
         if self._restoring:
             return
+        if self._closing:
+            return
         app = Gedit.App.get_default()
         has_documents = any(win.get_documents() for win in app.get_windows())
         if not has_documents:
@@ -288,40 +311,61 @@ class SessionRestoreWindowActivatable(GObject.Object, Gedit.WindowActivatable):
     def _on_tab_added(self, window, tab, data=None):
         """탭 추가 시: document changed 시그널 연결 + 즉시 세션 저장."""
         self._connect_doc(tab.get_document())
-        self._cancel_debounce()
-        self._save_session()
+        if not self._closing:
+            self._cancel_debounce()
+            self._save_session()
 
     def _on_tab_removed(self, window, tab, data=None):
         """탭 제거 시: document changed 시그널 해제 + 디바운스 저장.
-        종료 중 연속 제거 시 마지막 좋은 세이브를 보호한다.
+        종료 중(_closing)이면 저장을 스킵하여 delete-event의
+        마지막 좋은 세이브를 보호한다.
         """
         self._disconnect_doc(tab.get_document())
-        self._schedule_save()
+        if not self._closing:
+            self._schedule_save()
 
     def _on_tabs_changed(self, window, *args):
         """활성 탭 전환 시: 디바운스 저장.
-        종료 중 탭 제거로 인한 연쇄 전환에서도 안전.
+        종료 중이면 스킵.
         """
-        self._schedule_save()
+        if not self._closing:
+            self._schedule_save()
 
     def _on_document_changed(self, doc, data=None):
         """document 텍스트 변경 시: 디바운스 후 세션 저장.
         auto_snapshot 활성화 시 탭별 idle 타이머도 관리한다.
+        종료 중이면 스킵.
         """
+        if self._closing:
+            return
         self._schedule_save()
         if self._settings.get("auto_snapshot_enabled"):
             self._reset_tab_idle_timer(doc)
 
     def _on_window_delete_event(self, window, event, data=None):
         """윈도우 닫기 직전: 즉시 세션 저장.
-        복원 안정화 중이라도 강제로 저장한다.
+
+        Phase 9-2: _closing 플래그로 이후 tab-removed 등의 디바운스 저장을 차단.
+        Phase 9-3: 복원이 시도된 적 없으면 이전 세션을 보호한다.
         """
-        print("[SessionRestore] delete-event")
+        print("[SessionRestore] delete-event (restore_attempted=%s)"
+              % self._restore_attempted)
+        self._cancel_restore_fallback()
         self._cancel_restore_settle()
-        self._restoring = False
         self._cancel_debounce()
         self._cancel_all_tab_idle_timers()
-        self._save_session()
+
+        if self._restore_attempted:
+            # 정상 흐름: 복원이 시도된 후이므로 현재 상태를 저장한다.
+            self._restoring = False
+            self._save_session()
+        else:
+            # 복원이 시도되지 않음 — 이전 세션을 덮어쓰지 않는다.
+            print("[SessionRestore] restore never attempted, preserving existing session")
+
+        # _closing을 save 이후에 설정하여 위의 _save_session()은 정상 실행되고,
+        # 이후 tab-removed 등의 디바운스 저장은 차단된다.
+        self._closing = True
         return False
 
     def _on_window_show(self, window, data=None):
@@ -333,12 +377,46 @@ class SessionRestoreWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         if SessionRestoreAppActivatable.is_restored():
             # 다른 윈도우가 이미 복원 완료 — 이 윈도우는 저장 허용
             self._restoring = False
+            self._cancel_restore_fallback()
             return
 
         SessionRestoreAppActivatable.mark_restored()
+        self._cancel_restore_fallback()
         # _restoring은 do_activate에서 이미 True 설정됨.
         # UI 초기화 완료 후 복원하기 위해 idle 콜백 사용.
         GLib.idle_add(self._restore_session)
+
+    # ------------------------------------------------------------------
+    # Phase 9-1: show 시그널 미수신 fallback
+    # ------------------------------------------------------------------
+
+    def _check_restore_needed(self):
+        """show 시그널이 이미 발생한 경우 복원을 트리거하는 fallback.
+
+        do_activate() 시점에 윈도우가 이미 표시(visible)된 상태이면
+        show 시그널이 다시 발생하지 않으므로, idle 콜백에서 복원을 시도한다.
+        """
+        self._restore_fallback_id = None
+
+        # 이미 복원 완료됨 (show 핸들러가 먼저 실행된 경우)
+        if SessionRestoreAppActivatable.is_restored():
+            self._restoring = False
+            return False
+
+        # show 핸들러가 아직 실행되지 않음 — 직접 복원 트리거
+        print("[SessionRestore] restore fallback triggered"
+              " (show signal was missed)")
+
+        if self._show_handler is not None:
+            try:
+                self.window.disconnect(self._show_handler)
+            except Exception:
+                pass
+            self._show_handler = None
+
+        SessionRestoreAppActivatable.mark_restored()
+        self._restore_session()
+        return False  # idle 1회 실행
 
     # ------------------------------------------------------------------
     # 세션 복원
@@ -348,6 +426,8 @@ class SessionRestoreWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         """session.json 에서 탭을 복원한다.
         GLib.idle_add 콜백으로도 사용되므로 False 를 반환한다.
         """
+        self._restore_attempted = True
+
         session = self._session.load_session()
         if not session:
             print("[SessionRestore] no session to restore")
